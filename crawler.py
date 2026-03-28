@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
-import csv  # CSV 저장을 위한 모듈 추가
+import csv
+import pymysql  # MySQL 데이터베이스 연결을 위한 모듈
 
 def scrape_saramin_jobs():
     """사람인(Saramin)에서 'python' 검색 결과 채용공고를 크롤링하는 함수"""
@@ -55,34 +56,126 @@ def scrape_saramin_jobs():
     return jobs_list
 
 
+# =====================================================================
+# 2. 데이터베이스 파트
+# 💡 API 확장 팁: 이 함수들을 그대로 FastAPI나 Flask 같은 웹 프레임워크에서
+#    불러다 쓰면 바로 API로 확장할 수 있습니다!
+# =====================================================================
+
+# DB 접속 정보를 딕셔너리로 한 곳에 모아둡니다.
+# 🚨 본인의 MySQL 환경에 맞게 password와 database 값을 반드시 수정해주세요!
+DB_CONFIG = {
+    'host': '127.0.0.1',       # DB 서버 주소 (내 컴퓨터면 127.0.0.1 또는 localhost)
+    'user': 'root',            # MySQL 아이디
+    'password': 'yes050278!!',  # 🚨 본인의 MySQL 비밀번호로 변경!
+    'database': 'job_data_platform',      # 사용할 데이터베이스 이름 (미리 MySQL에서 만들어두어야 합니다)
+    'charset': 'utf8mb4',      # 한글/이모지 깨짐 방지
+    'cursorclass': pymysql.cursors.DictCursor  # 조회 결과를 딕셔너리 형태로 받기
+}
+
+
+def get_connection():
+    """DB와의 연결통로(connection)를 열어서 반환하는 함수.
+    나중에 API 서버(FastAPI, Flask 등)를 만들 때도 이 함수 하나만 import하면 됩니다.
+    """
+    return pymysql.connect(**DB_CONFIG)
+
+
+def create_jobs_table(conn):
+    """(1) DB에 jobs 테이블이 없으면 새로 생성하는 함수."""
+    with conn.cursor() as cursor:
+        # IF NOT EXISTS: 이미 테이블이 있으면 만들지 않으므로, 여러 번 실행해도 오류가 없습니다.
+        # created_at: 데이터가 저장된 시각을 자동으로 기록합니다.
+        sql = """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            company     VARCHAR(255)  NOT NULL,
+            title       VARCHAR(500)  NOT NULL,
+            link        VARCHAR(1000) NOT NULL,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        cursor.execute(sql)
+    conn.commit()  # 변경 사항을 DB에 확정(저장)합니다.
+    print("✅ [DB] jobs 테이블 준비 완료!")
+
+
+def insert_jobs(conn, jobs_list):
+    """(3) 크롤링한 공고 목록을 jobs 테이블에 INSERT 하는 함수."""
+    if not jobs_list:
+        print("저장할 데이터가 없습니다.")
+        return
+
+    with conn.cursor() as cursor:
+        # %s 는 파이썬 값을 SQL 안에 안전하게 넣기 위한 빈칸(placeholder)입니다.
+        # 직접 문자열을 붙이면 SQL 인젝션 공격에 취약해지므로, 반드시 이 방식을 사용해야 합니다.
+        sql = "INSERT INTO jobs (company, title, link) VALUES (%s, %s, %s)"
+
+        # executemany: for문 없이 리스트 전체를 한 번에 효율적으로 삽입합니다.
+        values = [(job['company'], job['title'], job['link']) for job in jobs_list]
+        cursor.executemany(sql, values)
+
+    conn.commit()
+    print(f"✅ [DB] 총 {len(jobs_list)}개의 공고가 성공적으로 저장되었습니다!")
+
+
+def select_all_jobs(conn):
+    """(4) jobs 테이블의 모든 데이터를 SELECT 해서 반환하는 함수.
+    API에서 GET /jobs 엔드포인트를 만들 때 이 함수를 그대로 활용할 수 있습니다.
+    """
+    with conn.cursor() as cursor:
+        # 최신 데이터부터 보이도록 id 기준 내림차순(DESC) 정렬합니다.
+        sql = "SELECT id, company, title, link, created_at FROM jobs ORDER BY id DESC"
+        cursor.execute(sql)
+        results = cursor.fetchall()  # 조회된 모든 행(row)을 리스트로 가져옵니다.
+    return results
+
+
+# =====================================================================
+# 3. 메인 실행 파트 (크롤링 → CSV 저장 → DB 저장 → DB 조회)
+# =====================================================================
 if __name__ == "__main__":
-    # 1. 크롤링부터 데이터 정제까지 포함된 위 함수를 실행합니다.
+    # [Step 1] 크롤링 실행
     scraped_data = scrape_saramin_jobs()
+    print(f"🎉 총 {len(scraped_data)}개의 정제된 채용공고를 수집했습니다!\n")
 
-    # 2. 터미널(화면)에 결과 출력하기
-    print(f"🎉 성공적으로 총 {len(scraped_data)}개의 정제된 채용공고를 수집했습니다!\n")
-    for i, data in enumerate(scraped_data, 1):
-        print(f"[{i}번 공고]")
-        print(f"🏢 회사명: {data['company']}")
-        print(f"📝 공고명: {data['title']}")
-        print(f"🔗 링크:   {data['link']}")
-        print("-" * 50)
-
-    # 3. [기능 4: CSV 파일로 저장하기]
-    # 모아둔 데이터를 엑셀에서 열 수 있도록 csv 파일로 저장합니다. 
-    # 한글 깨짐 현상을 막기 위해 인코딩을 반드시 'utf-8-sig' 로 설정해야 합니다. (조건 1)
-    # newline='' 는 윈도우 환경에서 엔터가 두 번씩 쳐져 엑셀에 한 줄씩 빈 공간이 생기는 것을 막아줍니다.
+    # [Step 2] CSV 파일 저장 (기존 기능 유지)
     with open("jobs.csv", mode="w", encoding="utf-8-sig", newline="") as file:
-        # csv에 글을 한 줄씩 쓸 수 있는 'DictWriter' 도구를 가져옵니다.
-        # fieldnames는 엑셀의 열 제목(머리글)이 됩니다. 딕셔너리의 키 이름과 동일해야 합니다.
-        fieldnames = ["company", "title", "link"]
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        
-        # 엑셀의 최상단 1번째 줄에 열 제목(company, title, link)을 적어줍니다.
+        writer = csv.DictWriter(file, fieldnames=["company", "title", "link"])
         writer.writeheader()
-        
-        # 수집한 데이터 리스트를 for문으로 하나씩 꺼내 엑셀의 행(row)에 작성합니다.
         for data in scraped_data:
             writer.writerow(data)
+    print("💾 'jobs.csv' 파일 저장 완료!\n")
 
-    print("💾 데이터 정제 및 'jobs.csv' 파일 저장이 성공적으로 완료되었습니다!")
+    # [Step 3] MySQL DB 저장 및 조회
+    # 🚨 실행 전 확인 사항:
+    #   1. MySQL 서버가 실행 중인지 확인 (XAMPP, MySQL Workbench 등)
+    #   2. 위 DB_CONFIG의 password와 database가 본인 환경과 일치하는지 확인
+    #   3. job_db 데이터베이스가 없다면 MySQL에서 먼저 생성:
+    #      > CREATE DATABASE job_db CHARACTER SET utf8mb4;
+    print("🚀 [DB 연동 시작]")
+    try:
+        conn = get_connection()      # DB 연결
+        create_jobs_table(conn)      # 테이블 생성 (없을 때만)
+        insert_jobs(conn, scraped_data)  # 크롤링 데이터 저장
+
+        # 저장된 데이터 중 최신 5건만 조회해서 확인
+        all_jobs = select_all_jobs(conn)
+        print(f"\n🔍 DB 저장 확인 (최신 5건 / 전체 {len(all_jobs)}건):")
+        print("-" * 60)
+        for job in all_jobs[:5]:
+            print(f"  [{job['id']}] {job['company']} | {job['title']}")
+            print(f"       저장시각: {job['created_at']}")
+        print("-" * 60)
+
+    except pymysql.MySQLError as e:
+        # DB 연결 실패 또는 SQL 오류 시 에러 내용을 친절하게 알려줍니다.
+        print("\n❌ 데이터베이스 오류가 발생했습니다:")
+        print(f"   {e}")
+        print("💡 해결 팁: DB_CONFIG의 password/database 값과 MySQL 서버 상태를 확인해주세요.")
+
+    finally:
+        # 성공하든 실패하든 마지막에는 반드시 연결을 닫아야 자원이 낭비되지 않습니다.
+        if 'conn' in locals() and conn.open:
+            conn.close()
+            print("\n🔌 DB 연결이 안전하게 종료되었습니다.")
