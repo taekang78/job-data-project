@@ -82,41 +82,66 @@ def get_connection():
 
 
 def create_jobs_table(conn):
-    """(1) DB에 jobs 테이블이 없으면 새로 생성하는 함수."""
+    """(1) DB에 jobs 테이블이 없으면 새로 생성하는 함수.
+
+    [중복 방지 핵심 포인트]
+    link 컬럼에 UNIQUE 제약(UNIQUE KEY)을 설정합니다.
+    UNIQUE 제약이란? → 같은 값을 가진 행(row)이 2개 이상 존재할 수 없도록
+    DB 자체가 강제로 막아주는 규칙입니다.
+    덕분에 파이썬 코드가 아닌 DB 레벨에서 중복을 원천 차단할 수 있습니다.
+    """
     with conn.cursor() as cursor:
-        # IF NOT EXISTS: 이미 테이블이 있으면 만들지 않으므로, 여러 번 실행해도 오류가 없습니다.
-        # created_at: 데이터가 저장된 시각을 자동으로 기록합니다.
         sql = """
         CREATE TABLE IF NOT EXISTS jobs (
             id          INT AUTO_INCREMENT PRIMARY KEY,
             company     VARCHAR(255)  NOT NULL,
             title       VARCHAR(500)  NOT NULL,
             link        VARCHAR(1000) NOT NULL,
-            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+            -- ✅ [중복 방지] link 값이 동일한 행이 2개 이상 저장되는 것을 DB가 직접 막습니다.
+            -- 이미 테이블이 존재하면 이 SQL 자체가 실행되지 않으므로,
+            -- 기존 테이블에 적용하려면 아래 주석의 ALTER TABLE 명령을 MySQL에서 한 번 실행하세요:
+            -- ALTER TABLE jobs ADD UNIQUE KEY uq_link (link);
+            UNIQUE KEY uq_link (link)
         )
         """
         cursor.execute(sql)
-    conn.commit()  # 변경 사항을 DB에 확정(저장)합니다.
-    print("✅ [DB] jobs 테이블 준비 완료!")
+    conn.commit()
+    print("✅ [DB] jobs 테이블 준비 완료! (link 컬럼 UNIQUE 제약 적용)")
 
 
 def insert_jobs(conn, jobs_list):
-    """(3) 크롤링한 공고 목록을 jobs 테이블에 INSERT 하는 함수."""
+    """(3) 크롤링한 공고 목록을 jobs 테이블에 INSERT 하는 함수.
+
+    [중복 방지 핵심 포인트]
+    INSERT IGNORE 를 사용합니다.
+    - 일반 INSERT: 이미 같은 link가 있으면 에러가 발생하고 프로그램이 중단됩니다.
+    - INSERT IGNORE: 이미 같은 link가 있으면 '조용히 건너뜁니다.' 에러 없이 계속 진행합니다.
+    → UNIQUE 제약 + INSERT IGNORE 조합이 중복 방지의 정석 패턴입니다!
+    """
     if not jobs_list:
         print("저장할 데이터가 없습니다.")
         return
 
-    with conn.cursor() as cursor:
-        # %s 는 파이썬 값을 SQL 안에 안전하게 넣기 위한 빈칸(placeholder)입니다.
-        # 직접 문자열을 붙이면 SQL 인젝션 공격에 취약해지므로, 반드시 이 방식을 사용해야 합니다.
-        sql = "INSERT INTO jobs (company, title, link) VALUES (%s, %s, %s)"
+    total = len(jobs_list)
+    saved_count = 0  # 실제로 DB에 새로 저장된 건수
 
-        # executemany: for문 없이 리스트 전체를 한 번에 효율적으로 삽입합니다.
-        values = [(job['company'], job['title'], job['link']) for job in jobs_list]
-        cursor.executemany(sql, values)
+    with conn.cursor() as cursor:
+        # ✅ INSERT IGNORE: link가 이미 존재하는 행은 오류 없이 조용히 건너뜁니다.
+        # 즉, 크롤러를 10번 실행해도 같은 공고는 딱 1번만 저장됩니다.
+        sql = "INSERT IGNORE INTO jobs (company, title, link) VALUES (%s, %s, %s)"
+
+        for job in jobs_list:
+            cursor.execute(sql, (job['company'], job['title'], job['link']))
+            # cursor.rowcount: 직전 SQL이 실제로 영향을 준 행 수입니다.
+            # INSERT IGNORE에서 중복으로 건너뛴 경우 rowcount = 0, 저장 성공 시 = 1 이 됩니다.
+            saved_count += cursor.rowcount
 
     conn.commit()
-    print(f"✅ [DB] 총 {len(jobs_list)}개의 공고가 성공적으로 저장되었습니다!")
+
+    skipped_count = total - saved_count  # 중복으로 인해 건너뛴 건수
+    print(f"✅ [DB] 처리 완료! → 새로 저장: {saved_count}건 / 중복 스킵: {skipped_count}건 / 전체 시도: {total}건")
 
 
 def select_all_jobs(conn):
@@ -135,17 +160,27 @@ def select_all_jobs(conn):
 # 3. 메인 실행 파트 (크롤링 → CSV 저장 → DB 저장 → DB 조회)
 # =====================================================================
 if __name__ == "__main__":
+    import pathlib
+
     # [Step 1] 크롤링 실행
     scraped_data = scrape_saramin_jobs()
     print(f"🎉 총 {len(scraped_data)}개의 정제된 채용공고를 수집했습니다!\n")
 
-    # [Step 2] CSV 파일 저장 (기존 기능 유지)
-    with open("jobs.csv", mode="w", encoding="utf-8-sig", newline="") as file:
+    # [Step 2] CSV 파일 저장
+    # pathlib.Path(__file__): 현재 실행 중인 파일(crawler.py)의 절대 경로를 가져옵니다.
+    # .parent: 그 파일이 들어있는 폴더(data_pipeline)를 의미합니다.
+    # .parent.parent: 한 단계 더 위(프로젝트 루트)로 올라갑니다.
+    # 이렇게 하면 어떤 위치에서 실행해도 항상 data/jobs.csv에 저장됩니다.
+    csv_path = pathlib.Path(__file__).parent.parent / "data" / "jobs.csv"
+
+    # mode="w" 는 파일을 매번 새로 덮어쓰는(overwrite) 모드입니다.
+    # 실행할 때마다 최신 데이터로 교체되므로, CSV 파일은 항상 딱 1개만 유지됩니다.
+    with open(csv_path, mode="w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=["company", "title", "link"])
         writer.writeheader()
         for data in scraped_data:
             writer.writerow(data)
-    print("💾 'jobs.csv' 파일 저장 완료!\n")
+    print(f"💾 CSV 저장 완료! → {csv_path}\n")
 
     # [Step 3] MySQL DB 저장 및 조회
     # 🚨 실행 전 확인 사항:
