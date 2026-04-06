@@ -43,22 +43,12 @@ app = FastAPI(
     version="1.2.0"
 )
 
-# DB 접속 정보 (crawler.py와 동일하게 맞춰주세요)
-DB_CONFIG = {
-    'host': '127.0.0.1',
-    'user': 'root',
-    'password': 'yes050278!!',       # 본인의 MySQL 비밀번호
-    'database': 'job_data_platform', # 사용할 데이터베이스 이름
-    'charset': 'utf8mb4',
-    'cursorclass': pymysql.cursors.DictCursor  # 결과를 딕셔너리로 받기
-}
+import sys
+import pathlib
 
-
-def get_connection():
-    """DB 연결통로를 열어서 반환하는 함수.
-    API 요청이 들어올 때마다 새로운 연결을 열고, 작업이 끝나면 닫습니다.
-    """
-    return pymysql.connect(**DB_CONFIG)
+# 상위 폴더(프로젝트 루트)를 경로에 추가하여 config 모듈 접근
+sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
+from config.database import get_connection
 
 
 # =====================================================================

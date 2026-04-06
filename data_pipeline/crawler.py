@@ -62,23 +62,12 @@ def scrape_saramin_jobs():
 #    불러다 쓰면 바로 API로 확장할 수 있습니다!
 # =====================================================================
 
-# DB 접속 정보를 딕셔너리로 한 곳에 모아둡니다.
-# 🚨 본인의 MySQL 환경에 맞게 password와 database 값을 반드시 수정해주세요!
-DB_CONFIG = {
-    'host': '127.0.0.1',       # DB 서버 주소 (내 컴퓨터면 127.0.0.1 또는 localhost)
-    'user': 'root',            # MySQL 아이디
-    'password': 'yes050278!!',  # 🚨 본인의 MySQL 비밀번호로 변경!
-    'database': 'job_data_platform',      # 사용할 데이터베이스 이름 (미리 MySQL에서 만들어두어야 합니다)
-    'charset': 'utf8mb4',      # 한글/이모지 깨짐 방지
-    'cursorclass': pymysql.cursors.DictCursor  # 조회 결과를 딕셔너리 형태로 받기
-}
+import sys
+import pathlib
 
-
-def get_connection():
-    """DB와의 연결통로(connection)를 열어서 반환하는 함수.
-    나중에 API 서버(FastAPI, Flask 등)를 만들 때도 이 함수 하나만 import하면 됩니다.
-    """
-    return pymysql.connect(**DB_CONFIG)
+# 상위 폴더(프로젝트 루트)를 경로에 추가하여 config 모듈 접근
+sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
+from config.database import get_connection
 
 
 def create_jobs_table(conn):

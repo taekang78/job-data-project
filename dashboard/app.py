@@ -29,19 +29,12 @@ st.set_page_config(
 )
 
 
-# ─────────────────────────────────────────────────────────────────────
-# [설정 2] DB 접속 정보
-# crawler.py, api.py와 동일한 값을 사용합니다.
-# 🚨 본인의 MySQL 비밀번호로 반드시 수정해주세요!
-# ─────────────────────────────────────────────────────────────────────
-DB_CONFIG = {
-    "host"       : "127.0.0.1",
-    "user"       : "root",
-    "password"   : "yes050278!!",       # 🚨 본인 비밀번호 입력
-    "database"   : "job_data_platform",
-    "charset"    : "utf8mb4",
-    "cursorclass": pymysql.cursors.DictCursor,
-}
+import sys
+import pathlib
+
+# 상위 폴더(프로젝트 루트)를 경로에 추가하여 config 모듈 접근
+sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
+from config.database import DB_CONFIG
 
 
 # ─────────────────────────────────────────────────────────────────────
