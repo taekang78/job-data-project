@@ -61,15 +61,17 @@ from config.database import get_connection
 @app.get("/jobs")
 def get_jobs(
     keyword: str = Query(default=None, description="제목 또는 회사명으로 검색 (예: 백엔드, 카카오)"),
-    company: str = Query(default=None, description="회사명으로 필터링 (예: 카카오, 네이버)")
+    company: str = Query(default=None, description="회사명으로 필터링 (예: 카카오, 네이버)"),
+    limit: int = Query(default=20, ge=1, le=100, description="한 번에 가져올 공고 수 (최대 100)"),
+    offset: int = Query(default=0, ge=0, description="건너뛸 공고 수 (페이징용)")
 ):
     """
-    채용공고 목록을 조회합니다.
+    채용공고 목록을 페이징 처리하여 조회합니다.
 
     - **keyword** : 공고 제목 또는 회사명에 해당 단어가 포함된 공고를 반환
     - **company** : 입력한 회사명과 일치하는 회사의 공고만 반환
-    - **두 파라미터 동시 사용** → AND 조건으로 교집합 결과 반환
-    - **파라미터 없음** → 전체 공고를 최신순으로 반환
+    - **limit** : 한 번에 가져올 공고 수 (조회 제한량, 기본 20)
+    - **offset** : 맨 앞에서부터 건너뛸 공고 수 (조회 시작점, 기본 0)
     """
     # ── 1. DB 연결 ──────────────────────────────────────────────────────
     conn = get_connection()
@@ -77,77 +79,54 @@ def get_jobs(
     try:
         with conn.cursor() as cursor:
 
-            # ──────────────────────────────────────────────────────────
-            # [동적 WHERE 절 구성 방법]
-            #
-            # 아이디어:
-            #   조건을 고정된 if/else 분기로 처리하면, 필터가 늘어날수록
-            #   경우의 수(keyword만/company만/둘 다/둘 다 없음)가 기하급수적으로 늘어납니다.
-            #
-            #   대신, 파이썬 리스트 2개를 준비합니다.
-            #   - conditions : SQL WHERE 절에 붙일 조건 문자열(예: "title LIKE %s")
-            #   - params     : 위 조건의 %s 자리에 채울 실제 값
-            #
-            #   파라미터가 있을 때마다 조건과 값을 리스트에 추가하고,
-            #   마지막에 ' AND '.join(conditions) 으로 한 번에 연결합니다.
-            #
-            # 장점:
-            #   새 필터(예: location, salary)가 생겨도 if 블록 하나만 추가하면 됩니다.
-            # ──────────────────────────────────────────────────────────
+            # [동적 WHERE 절 구성]
+            conditions = []
+            params = []
 
-            conditions = []  # WHERE 절에 들어갈 조건 목록
-            params     = []  # 각 조건의 %s에 대응하는 값 목록
-
-            # ── keyword 조건 추가 ────────────────────────────────────
-            # keyword가 있으면 제목(title) 또는 회사명(company) 중 하나라도
-            # 검색어를 포함하는 행을 조건으로 추가합니다.
-            # 괄호로 감싸야 OR 연산자가 다른 AND 조건과 섞이지 않습니다.
             if keyword:
                 conditions.append("(title LIKE %s OR company LIKE %s)")
-                like_keyword = f"%{keyword}%"   # '%검색어%' 형태로 LIKE 검색
-                params.extend([like_keyword, like_keyword])  # OR 이므로 값이 2개
+                like_keyword = f"%{keyword}%"
+                params.extend([like_keyword, like_keyword])
 
-            # ── company 조건 추가 ────────────────────────────────────
-            # company가 있으면 company 컬럼이 입력값을 포함하는 행만 필터합니다.
-            # 완전 일치가 아닌 LIKE를 사용하므로 '카카오'를 입력하면
-            # '카카오뱅크', '카카오페이' 등도 함께 조회됩니다.
             if company:
                 conditions.append("company LIKE %s")
-                params.append(f"%{company}%")  # '%회사명%' 형태
+                params.append(f"%{company}%")
 
-            # ── SQL 조립 ─────────────────────────────────────────────
-            # 기본 SELECT 절 (공통)
-            sql = "SELECT id, company, title, link, created_at FROM jobs"
-
-            # conditions 리스트에 값이 있을 때만 WHERE 절을 붙입니다.
-            # ' AND '.join([...]) : 조건들을 AND로 연결
-            #   예시)
-            #   conditions = ["(title LIKE %s OR company LIKE %s)", "company LIKE %s"]
-            #   → WHERE (title LIKE %s OR company LIKE %s) AND company LIKE %s
+            where_clause = ""
             if conditions:
-                sql += " WHERE " + " AND ".join(conditions)
+                where_clause = " WHERE " + " AND ".join(conditions)
 
-            # 정렬: created_at DESC → 최신 등록 공고가 항상 가장 위에
-            sql += " ORDER BY created_at DESC"
+            # ── [신규 추가] 전체 데이터 건수 추산 (COUNT) ────────────────
+            # 데이터를 일부만 꺼내기 전에(LIMIT 적용 전), 전체 조건에 부합하는 데이터가 
+            # 몇 개인지 미리 조회해야 정확한 전체 페이징 숫자를 알 수 있습니다.
+            count_sql = f"SELECT COUNT(*) as cnt FROM jobs{where_clause}"
+            cursor.execute(count_sql, params)
+            total_count = cursor.fetchone()['cnt']
 
-            # 완성된 SQL 실행 (params가 빈 리스트면 WHERE 없이 전체 조회)
-            cursor.execute(sql, params)
-
-            # 조회된 모든 행을 파이썬 리스트로 가져옵니다.
+            # ── 2. 데이터 조회 (LIMIT, OFFSET 적용) ──────────────────────
+            # 기존 쿼리에 내림차순 정렬을 유지하고, 끝에 LIMIT과 OFFSET을 붙입니다.
+            sql = f"SELECT id, company, title, link, created_at FROM jobs{where_clause} ORDER BY created_at DESC LIMIT %s OFFSET %s"
+            
+            # 파이썬 리스트 더하기 연산을 이용해, WHERE절 파라미터 뒤에 페이징 변수를 넣습니다.
+            final_params = params + [limit, offset]
+            
+            cursor.execute(sql, final_params)
             results = cursor.fetchall()
 
-        # ── 2. JSON 응답 반환 ─────────────────────────────────────────
-        # 적용된 필터 정보도 함께 반환하여 클라이언트가 어떤 조건으로
-        # 조회했는지 확인할 수 있게 합니다.
+        # ── 3. 실무형 JSON 응답 반환 (메타데이터/데이터 분리) ─────────
+        # 프론트엔드 연동과 파이프라인 확인을 돕기 위해 응답 구조를 명확히 나눕니다.
         return {
-            "total"  : len(results),  # 조회된 총 공고 수
-            "keyword": keyword,       # 사용된 keyword 필터 (없으면 null)
-            "company": company,       # 사용된 company 필터 (없으면 null)
-            "jobs"   : results        # 공고 목록
+            "meta": {
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+                "keyword": keyword,
+                "company": company
+            },
+            "data": results
         }
 
     finally:
-        # 예외가 발생해도 반드시 연결을 닫아 자원 낭비를 방지합니다.
         conn.close()
 
 
